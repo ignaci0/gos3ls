@@ -130,6 +130,9 @@ func main() {
 	// Define and parse command-line flags
 	defaultWorkers := runtime.NumCPU() * 10
 	workers := flag.Int("workers", defaultWorkers, "Number of concurrent workers to run.")
+	// --- MODIFIED --- Set the default region to eu-central-1
+	region := flag.String("region", "eu-central-1", "The AWS region of the bucket. (e.g., us-east-1).")
+
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage: %s [options] s3://bucket/prefix/\n", os.Args[0])
 		fmt.Fprintf(os.Stderr, "A tool to recursively count objects in an S3 prefix using concurrent workers.\n\n")
@@ -152,9 +155,16 @@ func main() {
 
 	log.Printf("Starting scan for %s with %d workers...", s3URI, *workers)
 
-	// Load AWS configuration from environment (e.g., ~/.aws/credentials)
+	// Load AWS configuration
 	ctx := context.Background()
-	cfg, err := config.LoadDefaultConfig(ctx)
+
+	// --- MODIFIED --- Build config options, adding region if provided
+	loadOptions := []func(*config.LoadOptions) error{}
+	if *region != "" {
+		loadOptions = append(loadOptions, config.WithRegion(*region))
+	}
+
+	cfg, err := config.LoadDefaultConfig(ctx, loadOptions...)
 	if err != nil {
 		log.Fatalf("Unable to load AWS SDK config: %v", err)
 	}
