@@ -1,52 +1,92 @@
-# S3 Concurrent Object Counter
+# gos3ls: S3 CLI Tool
 
-This is a command-line tool written in Go that recursively counts the total number of objects within a given S3 prefix. It uses a pool of concurrent goroutines to scan different parts of the prefix simultaneously, making it significantly faster than a simple serial scan for prefixes with many objects and subdirectories.
-Features
+`gos3ls` is a command-line tool written in Go designed to interact with S3 bucket objects. It provides functionalities for counting objects and batching their leaf names into local files, leveraging concurrent processing for efficiency.
 
-    Concurrent Scanning: Utilizes Go routines to scan multiple S3 "directories" at once.
+## Features
 
-    Efficient: Uses the Delimiter parameter in the S3 List API to avoid listing all keys at once.
+*   **Concurrent Scanning:** Utilizes Go routines to scan multiple S3 partitions (subdirectories) simultaneously for both counting and batching operations.
+*   **Efficient S3 Interaction:** Employs the S3 List API with appropriate parameters to efficiently retrieve object information.
+*   **Configurable Concurrency:** The number of worker goroutines can be configured to optimize performance based on your environment and S3 structure.
+*   **Standard AWS Authentication:** Uses the default AWS SDK credential chain (environment variables, shared credentials file, IAM roles).
+*   **Batching of Object Leaf Names:** Extracts the last part of S3 object keys (leaf names), batches them, and writes them to local files.
 
-    Configurable Concurrency: The number of worker goroutines can be easily configured.
+## Prerequisites
 
-    Standard AWS Authentication: Uses the default AWS SDK credential chain (environment variables, shared credentials file, IAM roles).
+*   Go (version 1.18 or higher)
+*   Configured AWS credentials. The easiest way is to have a `~/.aws/config` and `~/.aws/credentials` file, or set the standard `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, etc., environment variables.
 
-# Prerequisites
+## Installation & Build
 
-    Go (version 1.18 or higher)
-
-    Configured AWS credentials. The easiest way is to have a ~/.aws/config and ~/.aws/credentials file, or set the standard AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, etc., environment variables.
-
-# Installation & Build
-
+1.  Initialize Go modules:
+    ```bash
     go mod tidy
+    ```
+2.  Build the executable:
+    ```bash
+    CGO_ENABLED=0 go build -o gos3ls .
+    ```
+    This will create an executable file named `gos3ls` in the current directory.
 
-    Build the executable:
+## Usage
 
-    CGO_ENABLED=0 go build .
+The `gos3ls` tool provides subcommands for different operations. You can get general help or help for specific subcommands.
 
-    This will create an executable file named s3-counter in the current directory.
+### General Help
 
-# Usage
+```bash
+./gos3ls --help
+```
 
-Run the compiled binary, passing the S3 URI of the prefix you want to scan as the only argument.
-Basic Example
+### `count` Command
 
-./s3-counter s3://my-awesome-bucket/data/
+Counts objects in an S3 bucket with an optional prefix. It uses concurrent workers to speed up the scan.
 
-Example with a deeper prefix
+**Flags:**
 
-./s3-counter s3://my-awesome-bucket/logs/production/2023/
+*   `--bucket`, `-b <name>`: S3 bucket name (required).
+*   `--prefix`, `-p <prefix>`: S3 prefix (optional).
+*   `--profile`, `-f <profile>`: AWS profile to use (optional).
+*   `--region`, `-r <region>`: AWS region (e.g., `eu-central-1`, default: `eu-central-1`).
 
-Customizing Worker Count
+**Example:**
 
-You can specify the number of concurrent workers using the -workers flag. The default is 10 times the number of CPU cores. Increasing this number can speed up scans on very large and deep prefixes, but may also increase API costs and memory usage.
+```bash
+./gos3ls count -b my-awesome-bucket -p data/logs/
+```
 
-# Use 200 concurrent workers
-./s3-counter -workers 200 s3://my-large-dataset-bucket/raw-files/
+### `batch` Command
 
-Getting Help
+Batches S3 object leaf names into local files. It concurrently scans S3 partitions, extracts leaf names, and writes them to files, with each file containing a specified maximum number of leaf names.
 
-./s3-counter --help
+**Flags:**
 
+*   `--bucket`, `-b <name>`: S3 bucket name (required).
+*   `--prefix`, `-p <prefix>`: S3 prefix (optional).
+*   `--max-count`, `-m <count>`: Maximum number of object leaf names per batch file (default: `1000`).
+*   `--output-file-pattern`, `-o <pattern>`: Output filename pattern for batches. Supports placeholder:
+    *   `{{.BatchNum}}`: Replaced by the sequential batch number.
+    (Default: `batch-{{.BatchNum}}.txt`)
+*   `--workers`, `-w <count>`: Number of concurrent workers for scanning S3 partitions (default: `2 * NumCPU`).
+*   `--profile`, `-f <profile>`: AWS profile to use (optional).
+*   `--region`, `-r <region>`: AWS region (e.g., `eu-central-1`, default: `eu-central-1`).
 
+**Examples:**
+
+Batching leaf names from `my-source-bucket/my-data/` into files named `batch-1.txt`, `batch-2.txt`, etc., with 500 leaf names per file:
+
+```bash
+./gos3ls batch -b my-source-bucket -p my-data/ -m 500
+```
+
+Batching all leaf names from `another-bucket/` using 10 workers and a custom output pattern:
+
+```bash
+./gos3ls batch -b another-bucket -w 10 -o "output-{{.BatchNum}}.txt"
+```
+
+### Getting Help for Subcommands
+
+```bash
+./gos3ls batch --help
+./gos3ls count --help
+```
