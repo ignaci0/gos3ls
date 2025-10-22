@@ -5,9 +5,11 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/signal"
 	"runtime"
 	"sync"
 	"sync/atomic"
+	"syscall"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
@@ -33,7 +35,20 @@ var rootCmd = &cobra.Command{
 }
 
 func Execute() {
-	if err := rootCmd.Execute(); err != nil {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel() // Ensure cancel is called to release resources
+
+	// Set up signal handling
+	signals := make(chan os.Signal, 1)
+	signal.Notify(signals, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
+
+	go func() {
+		<-signals // Wait for a signal
+		log.Println("Received termination signal, initiating graceful shutdown...")
+		cancel() // Cancel the context
+	}()
+
+	if err := rootCmd.ExecuteContext(ctx); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
@@ -104,7 +119,7 @@ var batchCmd = &cobra.Command{
 	Use:   "batch",
 	Short: "Batch objects in an S3 bucket",
 	Long:  `Batch objects in an S3 bucket by their leaf name, using goroutines for processing.`, 
-	Example: `gos3ls batch -b my-source-bucket -p my-data/ -m 500 -o "{{.LeafName}}-batch-{{.BatchNum}}.txt"`,
+	Example: `gos3ls batch -b my-source-bucket -p my-data/ -m 500 -o "batch-{{.BatchNum}}.txt"`,
 	Run: func(cmd *cobra.Command, args []string) {
 		if bucket == "" {
 			log.Fatalf("Error: bucket name is required. Use --bucket or -b flag.")

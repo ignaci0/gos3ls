@@ -32,27 +32,47 @@ func BatchObjects(ctx context.Context, client *s3.Client, bucket, rootPrefix str
 		wgScanners.Add(1)
 		go func() {
 			defer wgScanners.Done()
-			for partitionPrefix := range partitionsChan {
-				log.Printf("Scanning partition: %s", partitionPrefix)
-				paginator := s3.NewListObjectsV2Paginator(client, &s3.ListObjectsV2Input{
-					Bucket: aws.String(bucket),
-					Prefix: aws.String(partitionPrefix),
-				})
-
-				for paginator.HasMorePages() {
-					page, err := paginator.NextPage(ctx)
-					if err != nil {
-						log.Printf("ERROR: Failed to list objects for prefix %s: %v", partitionPrefix, err)
-						// Continue to next page/partition, don't stop the whole process
-						continue
+			for {
+				select {
+				case <-ctx.Done():
+					log.Println("Scanner goroutine received context cancellation, exiting.")
+					return
+				case partitionPrefix, ok := <-partitionsChan:
+					if !ok {
+						return // Channel closed, no more partitions
 					}
+					log.Printf("Scanning partition: %s", partitionPrefix)
+					paginator := s3.NewListObjectsV2Paginator(client, &s3.ListObjectsV2Input{
+						Bucket: aws.String(bucket),
+						Prefix: aws.String(partitionPrefix),
+					})
 
-					for _, obj := range page.Contents {
-						if obj.Key != nil {
-							parts := strings.Split(*obj.Key, "/")
-							leafName := parts[len(parts)-1]
-							if leafName != "" { // Avoid adding empty strings if key ends with '/' 
-								leafNamesChan <- leafName
+					for paginator.HasMorePages() {
+						page, err := paginator.NextPage(ctx)
+						if err != nil {
+							// Check for context cancellation error
+							if ctx.Err() != nil {
+								log.Printf("Scanner for partition %s exiting due to context cancellation.", partitionPrefix)
+								return
+							}
+							log.Printf("ERROR: Failed to list objects for prefix %s: %v", partitionPrefix, err)
+							// Continue to next page/partition, don't stop the whole process
+							break // Break from paginator loop, try next partition
+						}
+
+						for _, obj := range page.Contents {
+							if obj.Key != nil {
+								parts := strings.Split(*obj.Key, "/")
+								leafName := parts[len(parts)-1]
+								if leafName != "" {
+									select {
+									case <-ctx.Done():
+										log.Println("Scanner goroutine received context cancellation while sending leafName, exiting.")
+										return
+									case leafNamesChan <- leafName:
+										// Sent successfully
+									}
+								}
 							}
 						}
 					}
@@ -62,156 +82,94 @@ func BatchObjects(ctx context.Context, client *s3.Client, bucket, rootPrefix str
 	}
 
 		    		// Determine a base leaf name for the output file pattern.
-
 		    		// This is used for the {{.LeafName}} placeholder in the output file pattern.
-
 		    		// It defaults to "batch" if no meaningful leaf name can be derived from the rootPrefix.
-
 		    		outputLeafName := "batch"
-
 		    		if rootPrefix != "" {
-
 		    			trimmedPrefix := strings.TrimSuffix(rootPrefix, "/")
-
 		    			parts := strings.Split(trimmedPrefix, "/")
-
 		    			if len(parts) > 0 && parts[len(parts)-1] != "" {
-
 		    				outputLeafName = parts[len(parts)-1]
-
 		    			}
-
 		    		}
-
 		    	
 
 		    		// 2. Start writer goroutine
-
 		    		wgWriter.Add(1)
-
 		    		go func(outputLeafName string) {
-
 		    			defer wgWriter.Done()
 
-		    	
-
 		    			var currentBatch []string
-
 		    			batchNum := 1
 
-		    	
-
 		    			writeBatchToFile := func() error {
-
 		    				if len(currentBatch) == 0 {
-
 		    					return nil
-
 		    				}
-
-		    	
 
 		    				data := struct {
-
 		    					LeafName string
-
 		    					BatchNum int
-
 		    				}{
-
 		    					LeafName: outputLeafName,
-
 		    					BatchNum: batchNum,
-
 		    				}
 
-		
-
 		            tmpl, err := template.New("outputFile").Parse(outputFilePattern)
-
 		            if err != nil {
-
 		                return fmt.Errorf("failed to parse output file pattern: %w", err)
-
 		            }
-
-		
 
 		            var fileNameBuf bytes.Buffer
-
 		            err = tmpl.Execute(&fileNameBuf, data)
-
 		            if err != nil {
-
 		                return fmt.Errorf("failed to execute output file pattern template: %w", err)
-
 		            }
-
 		            outputFileName := fileNameBuf.String()
 
-		
-
 		            file, err := os.Create(outputFileName)
-
 		            if err != nil {
-
 		                return fmt.Errorf("failed to create output file %s: %w", outputFileName, err)
-
 		            }
-
 		            defer file.Close()
 
-		
-
 		            for _, name := range currentBatch {
-
 		                _, err := file.WriteString(name + "\n")
-
 		                if err != nil {
-
 		                    return fmt.Errorf("failed to write to file %s: %w", outputFileName, err)
-
 		                }
-
 		            }
-
 		            log.Printf("Wrote %d leaf names to %s", len(currentBatch), outputFileName)
-
 		            currentBatch = nil // Reset batch
-
 		            batchNum++
-
 		            return nil
-
 		        }
 
-		
-
-		        for leafName := range leafNamesChan {
-
-		            currentBatch = append(currentBatch, leafName)
-
-		            if len(currentBatch) >= maxCount {
-
-		                if err := writeBatchToFile(); err != nil {
-
-		                    log.Printf("ERROR: %v", err)
-
-		                }
-
-		            }
-
-		        }
-
-		        // Write any remaining items in the last batch
-
-		        if err := writeBatchToFile(); err != nil {
-
-		            log.Printf("ERROR: %v", err)
-
-		        }
-
-		    }(outputLeafName)
+		        for {
+					select {
+					case <-ctx.Done():
+						log.Println("Writer goroutine received context cancellation, attempting to write remaining batch...")
+						if err := writeBatchToFile(); err != nil {
+							log.Printf("ERROR: Failed to write remaining batch during shutdown: %v", err)
+						}
+						return
+					case leafName, ok := <-leafNamesChan:
+						if !ok {
+							// Channel closed, write any remaining batch and exit
+							if err := writeBatchToFile(); err != nil {
+								log.Printf("ERROR: Failed to write final batch: %v", err)
+							}
+							return
+						}
+						currentBatch = append(currentBatch, leafName)
+						if len(currentBatch) >= maxCount {
+							if err := writeBatchToFile(); err != nil {
+								log.Printf("ERROR: %v", err)
+							}
+						}
+					}
+				}
+		    		}(outputLeafName)
 
 	// 3. Discover partitions and send them to partitionsChan
 	paginator := s3.NewListObjectsV2Paginator(client, &s3.ListObjectsV2Input{
